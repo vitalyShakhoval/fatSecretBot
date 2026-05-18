@@ -317,6 +317,124 @@ class HealthBot:
         fatsecret_data = await self.get_fatsecret_today()
         
         return f"{garmin_data}\n\n{fatsecret_data}"
+    
+    async def get_garmin_yesterday(self):
+        """Получение данных Garmin за вчера."""
+        if not self.garmin_logged_in or not self.garmin_client:
+            return None
+        
+        try:
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            
+            # Получаем статистику
+            stats = self.garmin_client.get_stats(yesterday)
+            if not stats:
+                return None
+            
+            return {
+                'steps': stats.get('totalSteps', 0),
+                'distance': stats.get('totalDistanceMeters', 0) / 1000,
+                'calories': stats.get('totalKilocalories', 0),
+                'active_calories': stats.get('activeKilocalories', 0),
+                'active_minutes': (stats.get('activeSeconds', 0) // 60),
+                'floors': stats.get('floorsAscended', 0),
+                'date': yesterday
+            }
+            
+        except Exception as e:
+            logger.error(f"Garmin yesterday ошибка: {e}")
+            return None
+    
+    async def get_fatsecret_yesterday(self):
+        """Получение данных питания из FatSecret за вчера."""
+        if not self.fatsecret_logged_in or not self.fatsecret_client:
+            return None
+        
+        try:
+            from datetime import date as date_module
+            yesterday = date_module.today() - timedelta(days=1)
+            
+            # Получаем записи дневника
+            entries = self.fatsecret_client.diary.entries_get_v2(date=yesterday)
+            
+            if not entries:
+                return None
+            
+            # Считаем итоги
+            totals = {'calories': 0, 'protein': 0, 'carbohydrate': 0, 'fat': 0}
+            
+            for entry in entries:
+                totals['calories'] += float(entry.calories) if entry.calories else 0
+                totals['protein'] += float(entry.protein) if entry.protein else 0
+                totals['carbohydrate'] += float(entry.carbohydrate) if entry.carbohydrate else 0
+                totals['fat'] += float(entry.fat) if entry.fat else 0
+            
+            return {
+                'calories': totals['calories'],
+                'protein': totals['protein'],
+                'carbohydrate': totals['carbohydrate'],
+                'fat': totals['fat'],
+                'date': yesterday.isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"FatSecret yesterday ошибка: {e}")
+            return None
+    
+    async def get_daily_report(self):
+        """Получение ежедневного отчёта за вчера."""
+        garmin = await self.get_garmin_yesterday()
+        fatsecret = await self.get_fatsecret_yesterday()
+        
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        
+        message = f"📋 <b>Отчёт за {yesterday}</b>\n\n"
+        
+        # Данные питания (FatSecret)
+        if fatsecret:
+            message += "🥗 <b>Питание (получено):</b>\n"
+            message += f"  Калории: {int(fatsecret['calories'])} ккал\n"
+            message += f"  Белки: {int(fatsecret['protein'])}г\n"
+            message += f"  Углеводы: {int(fatsecret['carbohydrate'])}г\n"
+            message += f"  Жиры: {int(fatsecret['fat'])}г\n"
+        else:
+            message += "🥗 <b>Питание:</b>\n  Нет данных\n"
+        
+        message += "\n"
+        
+        # Данные активности (Garmin)
+        if garmin:
+            total_calories = garmin.get('calories', 0)
+            active_calories = garmin.get('active_calories', 0)
+            message += "🏃 <b>Активность (затрачено):</b>\n"
+            message += f"  Калории (всего): {int(total_calories)} ккал\n"
+            message += f"  Калории (активные): {int(active_calories)} ккал\n"
+            message += f"  Шаги: {garmin['steps']:,}\n".replace(",", " ")
+            message += f"  Активные минуты: {garmin['active_minutes']}\n"
+            message += f"  Дистанция: {garmin['distance']:.2f} км\n"
+        else:
+            message += "🏃 <b>Активность:</b>\n  Нет данных\n"
+        
+        message += "\n"
+        
+        # Баланс калорий
+        if fatsecret and garmin:
+            consumed = fatsecret['calories']
+            burned = garmin.get('calories', garmin.get('active_calories', 0))
+            balance = consumed - burned
+            
+            message += "📊 <b>Баланс калорий:</b>\n"
+            message += f"  Получено: {int(consumed)} ккал\n"
+            message += f"  Сожжено: {int(burned)} ккал\n"
+            
+            if balance > 0:
+                message += f"  🔺 Избыток: {int(balance)} ккал\n"
+            elif balance < 0:
+                message += f"  🔻 Дефицит: {int(abs(balance))} ккал\n"
+            else:
+                message += "  ⚖️ Баланс: 0 ккал\n"
+        
+        return message
 
 
 # Инициализация бота
@@ -326,14 +444,15 @@ bot = HealthBot()
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     await update.message.reply_text(
-        "👋 Привет! Я бот для отображения данных о здоровье.\n\n"
-        "Команды:\n"
-        "/start - Показать это сообщение\n"
-        "/today - Данные за сегодня\n"
-        "/garmin - Только Garmin\n"
-        "/food - Только питание\n"
+        "👋 <b>Health Bot</b> - ваш помощник для отслеживания здоровья\n\n"
+        "📊 <b>Команды:</b>\n"
+        "/today - Данные за сегодня (Garmin + FatSecret)\n"
+        "/report - Отчёт за вчера (КБЖУ + баланс калорий)\n"
+        "/garmin - Только Garmin (шаги, калории, активность)\n"
+        "/food - Только питание (дневник FatSecret)\n"
         "/authfat - Авторизация FatSecret\n"
-        "/help - Помощь"
+        "/help - Подробная справка",
+        parse_mode='HTML'
     )
 
 
@@ -699,12 +818,33 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_garmin_setup)],
     )
     
+    # Обработчик команды /report
+    async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /report - ежедневный отчёт за вчера"""
+        await update.message.reply_text("⏳ Загружаю отчёт за вчера...")
+        
+        # Инициализируем подключения если нужно
+        if not bot.garmin_logged_in:
+            success, msg = await bot.init_garmin()
+            if not success:
+                await update.message.reply_text(f"⚠️ Garmin: {msg}")
+        
+        if not bot.fatsecret_logged_in:
+            success, msg = await bot.init_fatsecret()
+            if not success:
+                await update.message.reply_text(f"⚠️ FatSecret: {msg}")
+        
+        # Получаем отчёт
+        data = await bot.get_daily_report()
+        await update.message.reply_text(data, parse_mode='HTML')
+    
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("garmin", garmin_command))
     application.add_handler(CommandHandler("food", food_command))
+    application.add_handler(CommandHandler("report", report_command))
     # setupgarmin добавлен через ConversationHandler
     application.add_handler(oauth_handler)
     application.add_handler(garmin_setup_handler)
