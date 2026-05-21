@@ -447,17 +447,6 @@ class HealthBot:
                 day = (date.today() - timedelta(days=i)).isoformat()
                 try:
                     stats = self.garmin_client.get_stats(day)
-                    sleep = None
-                    try:
-                        sleep = self.garmin_client.get_sleep_data(day)
-                    except:
-                        pass
-                    
-                    sleep_duration = 0
-                    sleep_score = None
-                    if sleep:
-                        sleep_duration = sleep.get('sleepTime', sleep.get('duration', 0))
-                        sleep_score = sleep.get('sleepScore')
                     
                     if stats:
                         week_data.append({
@@ -467,10 +456,9 @@ class HealthBot:
                             'active_calories': stats.get('activeKilocalories', 0),
                             'active_minutes': (stats.get('activeSeconds', 0) // 60),
                             'distance': stats.get('totalDistanceMeters', 0) / 1000,
-                            'sleep_minutes': sleep_duration // 60 if sleep_duration else 0,
-                            'sleep_score': sleep_score,
                         })
-                except:
+                except Exception as e:
+                    logger.error(f"Ошибка получения данных за {day}: {e}")
                     pass
             return week_data
         except Exception as e:
@@ -564,30 +552,6 @@ class HealthBot:
             message += f"  Шаги: {best_day['steps']:,}\n".replace(",", " ")
         else:
             message += "🏃 <b>Активность:</b>\n  Нет данных\n"
-        
-        message += "\n"
-        
-        # Статистика сна
-        if garmin_week:
-            sleep_days = [d for d in garmin_week if d.get('sleep_minutes', 0) > 0]
-            if sleep_days:
-                total_sleep = sum(d.get('sleep_minutes', 0) for d in sleep_days)
-                avg_sleep = total_sleep / len(sleep_days)
-                hours = int(avg_sleep // 60)
-                mins = int(avg_sleep % 60)
-                
-                scores = [d.get('sleep_score') for d in sleep_days if d.get('sleep_score')]
-                avg_score = sum(scores) / len(scores) if scores else None
-                
-                message += "😴 <b>Сон (среднее):</b>\n"
-                message += f"  Продолжительность: {hours}ч {mins}мин\n"
-                if avg_score:
-                    message += f"  Sleep Score: {int(avg_score)}\n"
-                message += f"  Дней с данными: {len(sleep_days)}/7\n"
-            else:
-                message += "😴 <b>Сон:</b>\n  Нет данных\n"
-        else:
-            message += "😴 <b>Сон:</b>\n  Нет данных\n"
         
         message += "\n"
         
