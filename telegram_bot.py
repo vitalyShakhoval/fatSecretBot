@@ -579,19 +579,44 @@ class HealthBot:
 bot = HealthBot()
 
 
+def get_main_menu_keyboard():
+    """Создание главного меню с кнопками"""
+    from telegram import KeyboardButton, ReplyKeyboardMarkup
+    
+    # Кнопки отчётов
+    report_buttons = [
+        KeyboardButton("📊 Сегодня"),
+        KeyboardButton("📋 Вчера"),
+        KeyboardButton("📈 Неделя"),
+    ]
+    
+    # Кнопки настройки
+    auth_buttons = [
+        KeyboardButton("🔐 FatSecret Auth"),
+        KeyboardButton("⚙️ Garmin Setup"),
+    ]
+    
+    keyboard = [
+        report_buttons,
+        auth_buttons,
+    ]
+    
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     await update.message.reply_text(
         "👋 <b>Health Bot</b> - ваш помощник для отслеживания здоровья\n\n"
-        "📊 <b>Команды:</b>\n"
-        "/today - Данные за сегодня (Garmin + FatSecret)\n"
-        "/report - Отчёт за вчера (КБЖУ + баланс калорий)\n"
-        "/week - Аналитика за неделю\n"
-        "/garmin - Только Garmin (шаги, калории, активность)\n"
-        "/food - Только питание (дневник FatSecret)\n"
-        "/authfat - Авторизация FatSecret\n"
-        "/help - Подробная справка",
-        parse_mode='HTML'
+        "📊 <b>Отчёты:</b>\n"
+        "• /today - Данные за сегодня\n"
+        "• /report - Отчёт за вчера\n"
+        "• /week - Аналитика за неделю\n\n"
+        "🔐 <b>Настройка:</b>\n"
+        "• /authfat - Авторизация FatSecret\n"
+        "• /setupgarmin - Настройка Garmin",
+        parse_mode='HTML',
+        reply_markup=get_main_menu_keyboard()
     )
 
 
@@ -600,13 +625,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 <b>Справка</b>\n\n"
         "Этот бот показывает данные из:\n"
-        "• <b>Garmin Connect</b> - шаги, калории, сон, пульс\n"
+        "• <b>Garmin Connect</b> - шаги, калории, пульс\n"
         "• <b>FatSecret</b> - дневник питания\n\n"
         "Команды:\n"
         "/today - Сводка за сегодня\n"
-        "/garmin - Данные Garmin\n"
-        "/food - Дневник питания\n"
+        "/report - Отчёт за вчера\n"
+        "/week - Аналитика за неделю\n"
         "/authfat - Авторизация FatSecret\n"
+        "/setupgarmin - Настройка Garmin\n"
         "/help - Эта справка",
         parse_mode='HTML'
     )
@@ -997,6 +1023,22 @@ def main():
         data = await bot.get_weekly_report()
         await update.message.reply_text(data, parse_mode='HTML')
     
+    # Обработчики кнопок
+    async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик нажатий на кнопки"""
+        text = update.message.text
+        
+        if text == "📊 Сегодня":
+            await today_command(update, context)
+        elif text == "📋 Вчера":
+            await report_command(update, context)
+        elif text == "📈 Неделя":
+            await week_command(update, context)
+        elif text == "🔐 FatSecret Auth":
+            await authfat_command(update, context)
+        elif text == "⚙️ Garmin Setup":
+            await setupgarmin_command(update, context)
+    
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -1005,6 +1047,8 @@ def main():
     application.add_handler(CommandHandler("food", food_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("week", week_command))
+    # Обработчик кнопок (должен быть после команд)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
     # setupgarmin добавлен через ConversationHandler
     application.add_handler(oauth_handler)
     application.add_handler(garmin_setup_handler)
