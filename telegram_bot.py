@@ -435,6 +435,180 @@ class HealthBot:
                 message += "  ⚖️ Баланс: 0 ккал\n"
         
         return message
+    
+    async def get_garmin_week(self):
+        """Получение данных Garmin за последние 7 дней."""
+        if not self.garmin_logged_in or not self.garmin_client:
+            return []
+        
+        try:
+            week_data = []
+            for i in range(6, -1, -1):
+                day = (date.today() - timedelta(days=i)).isoformat()
+                try:
+                    stats = self.garmin_client.get_stats(day)
+                    sleep = None
+                    try:
+                        sleep = self.garmin_client.get_sleep_data(day)
+                    except:
+                        pass
+                    
+                    sleep_duration = 0
+                    sleep_score = None
+                    if sleep:
+                        sleep_duration = sleep.get('sleepTime', sleep.get('duration', 0))
+                        sleep_score = sleep.get('sleepScore')
+                    
+                    if stats:
+                        week_data.append({
+                            'date': day,
+                            'steps': stats.get('totalSteps', 0),
+                            'calories': stats.get('totalKilocalories', 0),
+                            'active_calories': stats.get('activeKilocalories', 0),
+                            'active_minutes': (stats.get('activeSeconds', 0) // 60),
+                            'distance': stats.get('totalDistanceMeters', 0) / 1000,
+                            'sleep_minutes': sleep_duration // 60 if sleep_duration else 0,
+                            'sleep_score': sleep_score,
+                        })
+                except:
+                    pass
+            return week_data
+        except Exception as e:
+            logger.error(f"Garmin week ошибка: {e}")
+            return []
+    
+    async def get_fatsecret_week(self):
+        """Получение данных питания из FatSecret за последние 7 дней."""
+        if not self.fatsecret_logged_in or not self.fatsecret_client:
+            return []
+        
+        try:
+            from datetime import date as date_module
+            week_data = []
+            
+            for i in range(6, -1, -1):
+                day = date_module.today() - timedelta(days=i)
+                try:
+                    entries = self.fatsecret_client.diary.entries_get_v2(date=day)
+                    
+                    totals = {'calories': 0, 'protein': 0, 'carbohydrate': 0, 'fat': 0}
+                    if entries:
+                        for entry in entries:
+                            totals['calories'] += float(entry.calories) if entry.calories else 0
+                            totals['protein'] += float(entry.protein) if entry.protein else 0
+                            totals['carbohydrate'] += float(entry.carbohydrate) if entry.carbohydrate else 0
+                            totals['fat'] += float(entry.fat) if entry.fat else 0
+                    
+                    week_data.append({
+                        'date': day.isoformat(),
+                        'calories': totals['calories'],
+                        'protein': totals['protein'],
+                        'carbohydrate': totals['carbohydrate'],
+                        'fat': totals['fat'],
+                    })
+                except:
+                    pass
+            
+            return week_data
+        except Exception as e:
+            logger.error(f"FatSecret week ошибка: {e}")
+            return []
+    
+    async def get_weekly_report(self):
+        """Получение еженедельного отчёта."""
+        garmin_week = await self.get_garmin_week()
+        fatsecret_week = await self.get_fatsecret_week()
+        
+        message = "📊 <b>Аналитика за неделю</b>\n\n"
+        
+        # Статистика питания
+        if fatsecret_week:
+            total_cal = sum(d['calories'] for d in fatsecret_week)
+            total_protein = sum(d['protein'] for d in fatsecret_week)
+            total_carbs = sum(d['carbohydrate'] for d in fatsecret_week)
+            total_fat = sum(d['fat'] for d in fatsecret_week)
+            days_with_data = len([d for d in fatsecret_week if d['calories'] > 0])
+            
+            if days_with_data > 0:
+                message += "🥗 <b>Питание (среднее в день):</b>\n"
+                message += f"  Калории: {int(total_cal / days_with_data)} ккал\n"
+                message += f"  Белки: {int(total_protein / days_with_data)}г\n"
+                message += f"  Углеводы: {int(total_carbs / days_with_data)}г\n"
+                message += f"  Жиры: {int(total_fat / days_with_data)}г\n"
+                message += f"  Дней с данными: {days_with_data}/7\n"
+            else:
+                message += "🥗 <b>Питание:</b>\n  Нет данных\n"
+        else:
+            message += "🥗 <b>Питание:</b>\n  Нет данных\n"
+        
+        message += "\n"
+        
+        # Статистика активности
+        if garmin_week:
+            total_steps = sum(d['steps'] for d in garmin_week)
+            total_cal = sum(d['calories'] for d in garmin_week)
+            total_active_cal = sum(d['active_calories'] for d in garmin_week)
+            total_minutes = sum(d['active_minutes'] for d in garmin_week)
+            total_distance = sum(d['distance'] for d in garmin_week)
+            
+            message += "🏃 <b>Активность (среднее в день):</b>\n"
+            message += f"  Шаги: {int(total_steps / 7):,}\n".replace(",", " ")
+            message += f"  Калории (всего): {int(total_cal / 7):,}\n".replace(",", " ")
+            message += f"  Калории (активные): {int(total_active_cal / 7):,}\n".replace(",", " ")
+            message += f"  Активные минуты: {int(total_minutes / 7)}\n"
+            message += f"  Дистанция: {total_distance / 7:.2f} км\n"
+            
+            # Лучший день
+            best_day = max(garmin_week, key=lambda x: x['steps'])
+            message += f"\n🏆 <b>Лучший день:</b> {best_day['date'][-5:]}\n"
+            message += f"  Шаги: {best_day['steps']:,}\n".replace(",", " ")
+        else:
+            message += "🏃 <b>Активность:</b>\n  Нет данных\n"
+        
+        message += "\n"
+        
+        # Статистика сна
+        if garmin_week:
+            sleep_days = [d for d in garmin_week if d.get('sleep_minutes', 0) > 0]
+            if sleep_days:
+                total_sleep = sum(d.get('sleep_minutes', 0) for d in sleep_days)
+                avg_sleep = total_sleep / len(sleep_days)
+                hours = int(avg_sleep // 60)
+                mins = int(avg_sleep % 60)
+                
+                scores = [d.get('sleep_score') for d in sleep_days if d.get('sleep_score')]
+                avg_score = sum(scores) / len(scores) if scores else None
+                
+                message += "😴 <b>Сон (среднее):</b>\n"
+                message += f"  Продолжительность: {hours}ч {mins}мин\n"
+                if avg_score:
+                    message += f"  Sleep Score: {int(avg_score)}\n"
+                message += f"  Дней с данными: {len(sleep_days)}/7\n"
+            else:
+                message += "😴 <b>Сон:</b>\n  Нет данных\n"
+        else:
+            message += "😴 <b>Сон:</b>\n  Нет данных\n"
+        
+        message += "\n"
+        
+        # Общий баланс за неделю
+        if fatsecret_week and garmin_week:
+            total_consumed = sum(d['calories'] for d in fatsecret_week)
+            total_burned = sum(d['calories'] for d in garmin_week)
+            week_balance = total_consumed - total_burned
+            
+            message += "📈 <b>Баланс за неделю:</b>\n"
+            message += f"  Получено: {int(total_consumed):,} ккал\n".replace(",", " ")
+            message += f"  Сожжено: {int(total_burned):,} ккал\n".replace(",", " ")
+            
+            if week_balance > 0:
+                message += f"  🔺 Избыток: {int(week_balance):,} ккал\n".replace(",", " ")
+            elif week_balance < 0:
+                message += f"  🔻 Дефицит: {int(abs(week_balance)):,} ккал\n".replace(",", " ")
+            else:
+                message += "  ⚖️ Баланс: 0 ккал\n"
+        
+        return message
 
 
 # Инициализация бота
@@ -448,6 +622,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 <b>Команды:</b>\n"
         "/today - Данные за сегодня (Garmin + FatSecret)\n"
         "/report - Отчёт за вчера (КБЖУ + баланс калорий)\n"
+        "/week - Аналитика за неделю\n"
         "/garmin - Только Garmin (шаги, калории, активность)\n"
         "/food - Только питание (дневник FatSecret)\n"
         "/authfat - Авторизация FatSecret\n"
@@ -838,6 +1013,26 @@ def main():
         data = await bot.get_daily_report()
         await update.message.reply_text(data, parse_mode='HTML')
     
+    # Обработчик команды /week
+    async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /week - еженедельная аналитика"""
+        await update.message.reply_text("⏳ Загружаю аналитику за неделю...")
+        
+        # Инициализируем подключения если нужно
+        if not bot.garmin_logged_in:
+            success, msg = await bot.init_garmin()
+            if not success:
+                await update.message.reply_text(f"⚠️ Garmin: {msg}")
+        
+        if not bot.fatsecret_logged_in:
+            success, msg = await bot.init_fatsecret()
+            if not success:
+                await update.message.reply_text(f"⚠️ FatSecret: {msg}")
+        
+        # Получаем отчёт
+        data = await bot.get_weekly_report()
+        await update.message.reply_text(data, parse_mode='HTML')
+    
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -845,6 +1040,7 @@ def main():
     application.add_handler(CommandHandler("garmin", garmin_command))
     application.add_handler(CommandHandler("food", food_command))
     application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("week", week_command))
     # setupgarmin добавлен через ConversationHandler
     application.add_handler(oauth_handler)
     application.add_handler(garmin_setup_handler)
