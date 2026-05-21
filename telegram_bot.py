@@ -11,7 +11,7 @@ Telegram бот для отображения данных Garmin и FatSecret
 import os
 import sys
 import logging
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, time
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -63,6 +63,9 @@ FATSECRET_OAUTH_TOKEN_SECRET = os.getenv('FATSECRET_OAUTH_TOKEN_SECRET', '')
 
 # Состояния для настройки Garmin
 (GARMIN_SETUP_EMAIL, GARMIN_SETUP_PASSWORD, GARMIN_SETUP_MFA) = range(10, 13)
+
+# Состояния для настройки времени отчёта
+(SET_REPORT_HOUR, SET_REPORT_MINUTE) = range(20, 22)
 
 
 class HealthBot:
@@ -590,18 +593,47 @@ def get_main_menu_keyboard():
         KeyboardButton("📈 Неделя"),
     ]
     
-    # Кнопки настройки
-    auth_buttons = [
+    # Кнопка настроек
+    settings_button = [KeyboardButton("⚙️ Настройка")]
+    
+    keyboard = [
+        report_buttons,
+        settings_button,
+    ]
+    
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def get_settings_keyboard(current_hour: int = 12, current_minute: int = 0):
+    """Создание меню настроек"""
+    from telegram import KeyboardButton, ReplyKeyboardMarkup
+    
+    # Форматируем текущее время
+    time_str = f"{current_hour:02d}:{current_minute:02d}"
+    
+    settings_buttons = [
         KeyboardButton("🔐 FatSecret Auth"),
         KeyboardButton("⚙️ Garmin Setup"),
     ]
     
+    time_buttons = [
+        KeyboardButton(f"⏰ Время отчёта: {time_str}"),
+    ]
+    
+    back_button = [KeyboardButton("🔙 Назад")]
+    
     keyboard = [
-        report_buttons,
-        auth_buttons,
+        settings_buttons,
+        time_buttons,
+        back_button,
     ]
     
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+# Глобальная переменная для хранения времени отчёта
+REPORT_HOUR = 12
+REPORT_MINUTE = 0
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -934,6 +966,107 @@ async def cancel_garmin_setup(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
+# Временное хранилище для настройки времени
+report_time_data = {'hour': None}
+
+
+async def set_report_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало настройки времени отчёта"""
+    await update.message.reply_text(
+        f"⏰ <b>Настройка времени отчёта</b>\n\n"
+        f"Текущее время: {REPORT_HOUR:02d}:{REPORT_MINUTE:02d}\n\n"
+        "Введите час (0-23):",
+        parse_mode='HTML'
+    )
+    return SET_REPORT_HOUR
+
+
+async def report_time_hour_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение часа"""
+    try:
+        hour = int(update.message.text.strip())
+        if 0 <= hour <= 23:
+            report_time_data['hour'] = hour
+            await update.message.reply_text(
+                f"✅ Час установлен: {hour:02d}:00\n\n"
+                "Введите минуты (0-59):"
+            )
+            return SET_REPORT_MINUTE
+        else:
+            await update.message.reply_text("❌ час должен быть от 0 до 23. Попробуйте ещё раз:")
+            return SET_REPORT_HOUR
+    except ValueError:
+        await update.message.reply_text("❌ Введите число от 0 до 23:")
+        return SET_REPORT_HOUR
+
+
+async def report_time_minute_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение минут и сохранение времени"""
+    try:
+        minute = int(update.message.text.strip())
+        if 0 <= minute <= 59:
+            global REPORT_HOUR, REPORT_MINUTE
+            REPORT_HOUR = report_time_data.get('hour', 12)
+            REPORT_MINUTE = minute
+            
+            # Очищаем данные
+            report_time_data.clear()
+            
+            # Сохраняем в .env
+            env_file = Path(__file__).parent / '.env'
+            content = env_file.read_text(encoding='utf-8')
+            
+            lines = content.split('\n')
+            new_lines = []
+            hour_updated = False
+            minute_updated = False
+            
+            for line in lines:
+                if line.startswith('REPORT_HOUR='):
+                    new_lines.append(f'REPORT_HOUR={REPORT_HOUR}')
+                    hour_updated = True
+                elif line.startswith('REPORT_MINUTE='):
+                    new_lines.append(f'REPORT_MINUTE={REPORT_MINUTE}')
+                    minute_updated = True
+                else:
+                    new_lines.append(line)
+            
+            if not hour_updated:
+                new_lines.append(f'REPORT_HOUR={REPORT_HOUR}')
+            if not minute_updated:
+                new_lines.append(f'REPORT_MINUTE={REPORT_MINUTE}')
+            
+            env_file.write_text('\n'.join(new_lines), encoding='utf-8')
+            
+            await update.message.reply_text(
+                f"✅ <b>Время отчёта сохранено!</b>\n\n"
+                f"Отчёт будет отправляться в {REPORT_HOUR:02d}:{REPORT_MINUTE:02d}",
+                parse_mode='HTML'
+            )
+            
+            # Показываем меню настроек
+            await update.message.reply_text(
+                "⚙️ <b>Настройка</b>",
+                parse_mode='HTML',
+                reply_markup=get_settings_keyboard(REPORT_HOUR, REPORT_MINUTE)
+            )
+            
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text("❌ Минуты должны быть от 0 до 59. Попробуйте ещё раз:")
+            return SET_REPORT_MINUTE
+    except ValueError:
+        await update.message.reply_text("❌ Введите число от 0 до 59:")
+        return SET_REPORT_MINUTE
+
+
+async def cancel_report_time_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена настройки времени"""
+    report_time_data.clear()
+    await update.message.reply_text("❌ Настройка времени отменена")
+    return ConversationHandler.END
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"Error: {context.error}")
@@ -981,6 +1114,16 @@ def main():
             GARMIN_SETUP_MFA: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^/"), garmin_setup_mfa_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel_garmin_setup)],
+    )
+    
+    # Conversation handler для настройки времени отчёта
+    report_time_handler = ConversationHandler(
+        entry_points=[CommandHandler("settime", set_report_time_command)],
+        states={
+            SET_REPORT_HOUR: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_time_hour_received)],
+            SET_REPORT_MINUTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_time_minute_received)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_report_time_setup)],
     )
     
     # Обработчик команды /report
@@ -1034,10 +1177,34 @@ def main():
             await report_command(update, context)
         elif text == "📈 Неделя":
             await week_command(update, context)
+        elif text == "⚙️ Настройка":
+            # Показываем меню настроек
+            await update.message.reply_text(
+                "⚙️ <b>Настройка</b>\n\n"
+                "Выберите действие:",
+                parse_mode='HTML',
+                reply_markup=get_settings_keyboard(REPORT_HOUR, REPORT_MINUTE)
+            )
         elif text == "🔐 FatSecret Auth":
             await authfat_command(update, context)
         elif text == "⚙️ Garmin Setup":
             await setupgarmin_command(update, context)
+        elif text.startswith("⏰ Время отчёта:"):
+            # Переход к настройке времени
+            await update.message.reply_text(
+                f"⏰ <b>Настройка времени отчёта</b>\n\n"
+                f"Текущее время: {REPORT_HOUR:02d}:{REPORT_MINUTE:02d}\n\n"
+                "Введите час (0-23):",
+                parse_mode='HTML'
+            )
+            return SET_REPORT_HOUR
+        elif text == "🔙 Назад":
+            # Возврат в главное меню
+            await update.message.reply_text(
+                "👋 <b>Главное меню</b>",
+                parse_mode='HTML',
+                reply_markup=get_main_menu_keyboard()
+            )
     
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start_command))
@@ -1052,10 +1219,56 @@ def main():
     # setupgarmin добавлен через ConversationHandler
     application.add_handler(oauth_handler)
     application.add_handler(garmin_setup_handler)
+    application.add_handler(report_time_handler)
     
     # Обработчик ошибок
     application.add_error_handler(error_handler)
     
+    # Настройка JobQueue для автоматической отправки отчётов
+    job_queue = application.job_queue
+    
+    async def send_daily_report_job(context: ContextTypes.DEFAULT_TYPE):
+        """Отправка ежедневного отчёта по расписанию"""
+        logger.info("Запуск автоматического отчёта за вчера...")
+        
+        # Инициализируем подключения если нужно
+        if not bot.garmin_logged_in:
+            success, msg = await bot.init_garmin()
+            if not success:
+                logger.error(f"Garmin: {msg}")
+                await context.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"⚠️ Garmin: {msg}"
+                )
+                return
+        
+        if not bot.fatsecret_logged_in:
+            success, msg = await bot.init_fatsecret()
+            if not success:
+                logger.error(f"FatSecret: {msg}")
+                await context.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"⚠️ FatSecret: {msg}"
+                )
+                return
+        
+        # Получаем отчёт
+        report = await bot.get_daily_report()
+        await context.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=report,
+            parse_mode='HTML'
+        )
+        logger.info("Автоматический отчёт отправлен")
+    
+    # Планируем ежедневную отправку в 12:00
+    job_queue.run_daily(send_daily_report_job, time=time(hour=12, minute=0))
+    
+    # Для тестирования - отправка через 30 секунд после запуска (раскомментируйте для теста)
+    #job_queue.run_once(send_daily_report_job, when=30, name="test_daily_report")
+    
+    logger.info("Настроено автоматическое расписание отчётов в 12:00")
+
     # Запускаем бота
     logger.info("Бот запущен. Ожидание команд...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
