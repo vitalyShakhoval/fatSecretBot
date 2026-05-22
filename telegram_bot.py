@@ -604,12 +604,18 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 
-def get_settings_keyboard(current_hour: int = 12, current_minute: int = 0):
+def get_settings_keyboard(current_hour: int = 12, current_minute: int = 0, timezone_offset: int = 0):
     """Создание меню настроек"""
     from telegram import KeyboardButton, ReplyKeyboardMarkup
     
     # Форматируем текущее время
     time_str = f"{current_hour:02d}:{current_minute:02d}"
+    
+    # Форматируем часовой пояс
+    if timezone_offset >= 0:
+        tz_str = f"UTC+{timezone_offset}"
+    else:
+        tz_str = f"UTC{timezone_offset}"
     
     settings_buttons = [
         KeyboardButton("🔐 FatSecret Auth"),
@@ -618,6 +624,7 @@ def get_settings_keyboard(current_hour: int = 12, current_minute: int = 0):
     
     time_buttons = [
         KeyboardButton(f"⏰ Время отчёта: {time_str}"),
+        KeyboardButton(f"🌍 Часовой пояс: {tz_str}"),
     ]
     
     back_button = [KeyboardButton("🔙 Назад")]
@@ -631,9 +638,13 @@ def get_settings_keyboard(current_hour: int = 12, current_minute: int = 0):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 
-# Глобальная переменная для хранения времени отчёта
-REPORT_HOUR = 12
-REPORT_MINUTE = 0
+# Глобальная переменная для хранения времени отчёта (UTC)
+REPORT_HOUR = int(os.getenv('REPORT_HOUR', '12'))
+REPORT_MINUTE = int(os.getenv('REPORT_MINUTE', '0'))
+
+# Сдвиг часового пояса пользователя относительно UTC (в часах)
+# Например, для Москвы (UTC+3) -> TIMEZONE_OFFSET = 3
+TIMEZONE_OFFSET = int(os.getenv('TIMEZONE_OFFSET', '0'))
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -663,6 +674,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/today - Сводка за сегодня\n"
         "/report - Отчёт за вчера\n"
         "/week - Аналитика за неделю\n"
+        "/sendreport - Отправить отчёт сейчас\n"
         "/authfat - Авторизация FatSecret\n"
         "/setupgarmin - Настройка Garmin\n"
         "/help - Эта справка",
@@ -975,42 +987,31 @@ async def set_report_time_command(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(
         f"⏰ <b>Настройка времени отчёта</b>\n\n"
         f"Текущее время: {REPORT_HOUR:02d}:{REPORT_MINUTE:02d}\n\n"
-        "Введите час (0-23):",
+        "Введите время в формате ЧЧ:ММ (например 12:00 или 08:30):",
         parse_mode='HTML'
     )
     return SET_REPORT_HOUR
 
 
-async def report_time_hour_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение часа"""
+async def report_time_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение времени и сохранение"""
+    time_text = update.message.text.strip()
+    
+    # Пробуем разобрать время в формате ЧЧ:ММ
     try:
-        hour = int(update.message.text.strip())
-        if 0 <= hour <= 23:
-            report_time_data['hour'] = hour
-            await update.message.reply_text(
-                f"✅ Час установлен: {hour:02d}:00\n\n"
-                "Введите минуты (0-59):"
-            )
-            return SET_REPORT_MINUTE
+        if ':' in time_text:
+            parts = time_text.split(':')
+            hour = int(parts[0])
+            minute = int(parts[1])
         else:
-            await update.message.reply_text("❌ час должен быть от 0 до 23. Попробуйте ещё раз:")
-            return SET_REPORT_HOUR
-    except ValueError:
-        await update.message.reply_text("❌ Введите число от 0 до 23:")
-        return SET_REPORT_HOUR
-
-
-async def report_time_minute_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение минут и сохранение времени"""
-    try:
-        minute = int(update.message.text.strip())
-        if 0 <= minute <= 59:
+            # Если введено просто число - считаем как часы
+            hour = int(time_text)
+            minute = 0
+        
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
             global REPORT_HOUR, REPORT_MINUTE
-            REPORT_HOUR = report_time_data.get('hour', 12)
+            REPORT_HOUR = hour
             REPORT_MINUTE = minute
-            
-            # Очищаем данные
-            report_time_data.clear()
             
             # Сохраняем в .env
             env_file = Path(__file__).parent / '.env'
@@ -1053,11 +1054,17 @@ async def report_time_minute_received(update: Update, context: ContextTypes.DEFA
             
             return ConversationHandler.END
         else:
-            await update.message.reply_text("❌ Минуты должны быть от 0 до 59. Попробуйте ещё раз:")
-            return SET_REPORT_MINUTE
-    except ValueError:
-        await update.message.reply_text("❌ Введите число от 0 до 59:")
-        return SET_REPORT_MINUTE
+            await update.message.reply_text(
+                "❌ Неверное время. Часы 0-23, минуты 0-59.\n"
+                "Введите время в формате ЧЧ:ММ (например 12:00):"
+            )
+            return SET_REPORT_HOUR
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            "❌ Неверный формат. Введите время в формате ЧЧ:ММ\n"
+            "Например: 12:00 или 08:30"
+        )
+        return SET_REPORT_HOUR
 
 
 async def cancel_report_time_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1120,8 +1127,7 @@ def main():
     report_time_handler = ConversationHandler(
         entry_points=[CommandHandler("settime", set_report_time_command)],
         states={
-            SET_REPORT_HOUR: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_time_hour_received)],
-            SET_REPORT_MINUTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_time_minute_received)],
+            SET_REPORT_HOUR: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_time_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel_report_time_setup)],
     )
@@ -1171,6 +1177,141 @@ def main():
         """Обработчик нажатий на кнопки"""
         text = update.message.text
         
+        # Проверяем, ожидаем ли мы ввод времени
+        if context.user_data.get('waiting_for_time'):
+            # Очищаем состояние
+            context.user_data.pop('waiting_for_time', None)
+            
+            # Обрабатываем ввод времени
+            time_text = text.strip()
+            try:
+                if ':' in time_text:
+                    parts = time_text.split(':')
+                    hour = int(parts[0])
+                    minute = int(parts[1])
+                else:
+                    hour = int(time_text)
+                    minute = 0
+                
+                if 0 <= hour <= 23 and 0 <= minute <= 59:
+                    global REPORT_HOUR, REPORT_MINUTE
+                    REPORT_HOUR = hour
+                    REPORT_MINUTE = minute
+                    
+                    # Сохраняем в .env
+                    env_file = Path(__file__).parent / '.env'
+                    content = env_file.read_text(encoding='utf-8')
+                    
+                    lines = content.split('\n')
+                    new_lines = []
+                    hour_updated = False
+                    minute_updated = False
+                    
+                    for line in lines:
+                        if line.startswith('REPORT_HOUR='):
+                            new_lines.append(f'REPORT_HOUR={REPORT_HOUR}')
+                            hour_updated = True
+                        elif line.startswith('REPORT_MINUTE='):
+                            new_lines.append(f'REPORT_MINUTE={REPORT_MINUTE}')
+                            minute_updated = True
+                        else:
+                            new_lines.append(line)
+                    
+                    if not hour_updated:
+                        new_lines.append(f'REPORT_HOUR={REPORT_HOUR}')
+                    if not minute_updated:
+                        new_lines.append(f'REPORT_MINUTE={REPORT_MINUTE}')
+                    
+                    env_file.write_text('\n'.join(new_lines), encoding='utf-8')
+                    
+                    await update.message.reply_text(
+                        f"✅ <b>Время отчёта сохранено!</b>\n\n"
+                        f"Отчёт будет отправляться в {REPORT_HOUR:02d}:{REPORT_MINUTE:02d}",
+                        parse_mode='HTML'
+                    )
+                    
+                    # Показываем меню настроек
+                    await update.message.reply_text(
+                        "⚙️ <b>Настройка</b>",
+                        parse_mode='HTML',
+                        reply_markup=get_settings_keyboard(REPORT_HOUR, REPORT_MINUTE)
+                    )
+                    return
+                else:
+                    await update.message.reply_text(
+                        "❌ Неверное время. Часы 0-23, минуты 0-59.\n"
+                        "Введите время в формате ЧЧ:ММ (например 12:00):"
+                    )
+                    return
+            except (ValueError, IndexError):
+                await update.message.reply_text(
+                    "❌ Неверный формат. Введите время в формате ЧЧ:ММ\n"
+                    "Например: 12:00 или 08:30"
+                )
+                return
+        
+        # Проверяем, ожидаем ли мы ввод часового пояса
+        if context.user_data.get('waiting_for_timezone'):
+            # Очищаем состояние
+            context.user_data.pop('waiting_for_timezone', None)
+            
+            # Обрабатываем ввод часового пояса
+            tz_text = text.strip()
+            try:
+                tz_offset = int(tz_text)
+                
+                if -12 <= tz_offset <= 14:
+                    global TIMEZONE_OFFSET
+                    TIMEZONE_OFFSET = tz_offset
+                    
+                    # Сохраняем в .env
+                    env_file = Path(__file__).parent / '.env'
+                    content = env_file.read_text(encoding='utf-8')
+                    
+                    lines = content.split('\n')
+                    new_lines = []
+                    tz_updated = False
+                    
+                    for line in lines:
+                        if line.startswith('TIMEZONE_OFFSET='):
+                            new_lines.append(f'TIMEZONE_OFFSET={TIMEZONE_OFFSET}')
+                            tz_updated = True
+                        else:
+                            new_lines.append(line)
+                    
+                    if not tz_updated:
+                        new_lines.append(f'TIMEZONE_OFFSET={TIMEZONE_OFFSET}')
+                    
+                    env_file.write_text('\n'.join(new_lines), encoding='utf-8')
+                    
+                    tz_display = f"UTC{'+' if TIMEZONE_OFFSET >= 0 else ''}{TIMEZONE_OFFSET}"
+                    await update.message.reply_text(
+                        f"✅ <b>Часовой пояс сохранён!</b>\n\n"
+                        f"Ваш часовой пояс: {tz_display}",
+                        parse_mode='HTML'
+                    )
+                    
+                    # Показываем меню настроек
+                    await update.message.reply_text(
+                        "⚙️ <b>Настройка</b>",
+                        parse_mode='HTML',
+                        reply_markup=get_settings_keyboard(REPORT_HOUR, REPORT_MINUTE, TIMEZONE_OFFSET)
+                    )
+                    return
+                else:
+                    await update.message.reply_text(
+                        "❌ Неверный часовой пояс. Диапазон: -12 до +14\n"
+                        "Например: 3 (для Москвы UTC+3)"
+                    )
+                    return
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Неверный формат. Введите число (сдвиг от UTC):\n"
+                    "Например: 3 (для Москвы UTC+3)"
+                )
+                return
+        
+        # Обработка кнопок меню
         if text == "📊 Сегодня":
             await today_command(update, context)
         elif text == "📋 Вчера":
@@ -1194,10 +1335,25 @@ def main():
             await update.message.reply_text(
                 f"⏰ <b>Настройка времени отчёта</b>\n\n"
                 f"Текущее время: {REPORT_HOUR:02d}:{REPORT_MINUTE:02d}\n\n"
-                "Введите час (0-23):",
+                "Введите время в формате ЧЧ:ММ (например 12:00 или 08:30):",
                 parse_mode='HTML'
             )
-            return SET_REPORT_HOUR
+            # Устанавливаем состояние ожидания времени
+            context.user_data['waiting_for_time'] = True
+            return
+        elif text.startswith("🌍 Часовой пояс:"):
+            # Переход к настройке часового пояса
+            await update.message.reply_text(
+                f"🌍 <b>Настройка часового пояса</b>\n\n"
+                f"Текущий часовой пояс: UTC{'+' if TIMEZONE_OFFSET >= 0 else ''}{TIMEZONE_OFFSET}\n\n"
+                "Введите ваш часовой пояс (сдвиг от UTC):\n"
+                "Например: 3 (для Москвы UTC+3)\n"
+                "         -5 (для Нью-Йорка UTC-5)",
+                parse_mode='HTML'
+            )
+            # Устанавливаем состояние ожидания часового пояса
+            context.user_data['waiting_for_timezone'] = True
+            return
         elif text == "🔙 Назад":
             # Возврат в главное меню
             await update.message.reply_text(
@@ -1214,6 +1370,7 @@ def main():
     application.add_handler(CommandHandler("food", food_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("week", week_command))
+    application.add_handler(CommandHandler("sendreport", report_command))
     # Обработчик кнопок (должен быть после команд)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
     # setupgarmin добавлен через ConversationHandler
@@ -1231,13 +1388,17 @@ def main():
         """Отправка ежедневного отчёта по расписанию"""
         logger.info("Запуск автоматического отчёта за вчера...")
         
+        # Используем chat_id из контекста задачи или из .env
+        chat_id = context.job.chat_id if context.job.chat_id else TELEGRAM_CHAT_ID
+        logger.info(f"Отправка в chat_id: {chat_id}")
+        
         # Инициализируем подключения если нужно
         if not bot.garmin_logged_in:
             success, msg = await bot.init_garmin()
             if not success:
                 logger.error(f"Garmin: {msg}")
                 await context.bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID,
+                    chat_id=chat_id,
                     text=f"⚠️ Garmin: {msg}"
                 )
                 return
@@ -1247,7 +1408,7 @@ def main():
             if not success:
                 logger.error(f"FatSecret: {msg}")
                 await context.bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID,
+                    chat_id=chat_id,
                     text=f"⚠️ FatSecret: {msg}"
                 )
                 return
@@ -1255,19 +1416,58 @@ def main():
         # Получаем отчёт
         report = await bot.get_daily_report()
         await context.bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
+            chat_id=chat_id,
             text=report,
             parse_mode='HTML'
         )
         logger.info("Автоматический отчёт отправлен")
     
-    # Планируем ежедневную отправку в 12:00
-    job_queue.run_daily(send_daily_report_job, time=time(hour=12, minute=0))
+    # Вычисляем время отправки с учётом часового пояса пользователя
+    # REPORT_HOUR - это время в часовом поясе пользователя
+    # Переводим в UTC: UTC_time = user_time - timezone_offset
+    utc_hour = (REPORT_HOUR - TIMEZONE_OFFSET) % 24
+    utc_minute = REPORT_MINUTE
     
-    # Для тестирования - отправка через 30 секунд после запуска (раскомментируйте для теста)
-    #job_queue.run_once(send_daily_report_job, when=30, name="test_daily_report")
+    # Используем chat_id из .env для scheduled задач
+    target_chat_id = TELEGRAM_CHAT_ID if TELEGRAM_CHAT_ID else None
     
-    logger.info("Настроено автоматическое расписание отчётов в 12:00")
+    # Планируем ежедневную отправку с учётом часового пояса
+    job_queue.run_daily(send_daily_report_job, time=time(hour=utc_hour, minute=utc_minute), chat_id=target_chat_id)
+    
+    # Для тестирования - отправка через 30 секунд после запуска
+    # job_queue.run_once(send_daily_report_job, when=30, name="test_daily_report", chat_id=target_chat_id)
+    
+    tz_display = f"UTC{'+' if TIMEZONE_OFFSET >= 0 else ''}{TIMEZONE_OFFSET}"
+    logger.info(f"Настроено автоматическое расписание отчётов в {REPORT_HOUR:02d}:{REPORT_MINUTE:02d} ({tz_display})")
+    logger.info(f"Время в UTC: {utc_hour:02d}:{utc_minute:02d}")
+    
+    # Обработчик команды /sendreport для ручной отправки
+    async def sendreport_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /sendreport - ручная отправка отчёта"""
+        await update.message.reply_text("⏳ Отправляю отчёт...")
+        
+        # Инициализируем подключения если нужно
+        if not bot.garmin_logged_in:
+            success, msg = await bot.init_garmin()
+            if not success:
+                await update.message.reply_text(f"⚠️ Garmin: {msg}")
+                return
+        
+        if not bot.fatsecret_logged_in:
+            success, msg = await bot.init_fatsecret()
+            if not success:
+                await update.message.reply_text(f"⚠️ FatSecret: {msg}")
+                return
+        
+        # Получаем отчёт
+        report = await bot.get_daily_report()
+        
+        # Отправляем отчёт
+        await update.message.reply_text(report, parse_mode='HTML')
+        logger.info("Отчёт отправлен по запросу пользователя")
+    
+    # Добавляем обработчик команды /sendreport
+    application.add_handler(CommandHandler("sendreport", sendreport_command))
 
     # Запускаем бота
     logger.info("Бот запущен. Ожидание команд...")
