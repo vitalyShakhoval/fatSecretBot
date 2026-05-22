@@ -1,71 +1,122 @@
-# Garmin Connect Statistics App
+# Health Bot - Telegram Health Tracker
 
-Приложение на Python для получения статистики из Garmin Connect API.
+Python application for retrieving health statistics from Garmin Connect and FatSecret via Telegram bot.
 
-## Возможности
+## Features
 
-Приложение получает следующую статистику из Garmin Connect:
+### Garmin Connect
+- 👟 **Steps** - daily goal and progress
+- 📏 **Distance** - distance in km
+- 🔥 **Calories** - total and active
+- ⏱️ **Active Minutes** - physical activity time
+- 🏢 **Floors** - floors climbed
+- 💓 **Resting Heart Rate** - heart rate at rest
 
-- 👤 **Профиль пользователя** - имя, дата регистрации
-- 📊 **Ежедневная статистика** - шаги, расстояние, калории, активные минуты, этажи
-- ❤️ **Данные пульса** - пульс в покое, зоны ЧСС
-- 😴 **Данные сна** - продолжительность, оценка сна, глубокий/легкий/REM сон
-- ⚖️ **Состав тела** - вес, BMI, процент жира
-- 🏃 **Активности** - последние тренировки
-- ⌚ **Подключенные устройства** - список устройств Garmin
+### FatSecret
+- 📝 **Food Diary** - food entries by meal
+- 🥗 **Macronutrients** - protein, carbs, fat
+- 🔢 **Calories** - daily intake
 
-## Требования
+### Telegram Bot
+- 📊 `/today` - data for today
+- 📋 `/report` - report for yesterday
+- 📈 `/week` - weekly analytics
+- 🔐 `/authfat` - FatSecret authorization
+- ⚙️ `/setupgarmin` - Garmin setup
+- ⏰ Automatic report delivery on schedule
 
-- Python 3.8+
-- Учётная запись Garmin Connect
+## Requirements
 
-## Установка
+- Python 3.12+
+- Telegram bot (get from @BotFather)
+- FatSecret account (with API keys)
+- Garmin Connect account
 
-1. Клонируйте репозиторий или скачайте файлы
+## Getting FatSecret API Keys
 
-2. Установите зависимости:
+1. Register at https://platform.fatsecret.com
+2. After creation you will get:
+   - **Client ID** (Consumer Key)
+   - **Client Secret** (Consumer Secret)
+3. To get OAuth tokens use `/authfat` command in the bot
+
+Documentation: https://platform.fatsecret.com/api/
+
+## Installation
+
+1. Clone the repository or download files
+
+2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Создайте файл `.env` на основе `.env.example`:
+3. Create `.env` file from `.env.example`:
 ```bash
 copy .env.example .env
 ```
 
-4. Отредактируйте `.env` и введите ваши учётные данные Garmin Connect:
+4. Edit `.env`:
 ```env
-EMAIL=your_email@example.com
-PASSWORD=your_password
+# Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+
+# Garmin
+EMAIL=your_garmin_email
+PASSWORD=your_garmin_password
+
+# FatSecret (get from https://platform.fatsecret.com)
+FATSECRET_CLIENT_ID=your_client_id
+FATSECRET_CONSUMER_KEY=your_consumer_key
+FATSECRET_CONSUMER_SECRET=your_consumer_secret
+
+# Report settings (optional)
+REPORT_HOUR=12
+REPORT_MINUTE=0
+TIMEZONE_OFFSET=3
 ```
 
-## Использование
+## Usage
 
-Запустите приложение:
+### Run Telegram bot:
 ```bash
-python garmin_app.py
+python telegram_bot.py
 ```
 
-При первом запуске потребуется аутентификация. Если у вас включена двухфакторная аутентификация (MFA), введите код из SMS или приложения-аутентификатора.
+### FatSecret Authorization:
+1. Send `/authfat` to the bot
+2. Follow the link and authorize
+3. Get PIN code
+4. Send PIN to the bot
 
-Токены будут сохранены в папку `~/.garminconnect/` для последующих запусков.
+### Garmin Setup:
+1. Send `/setupgarmin` to the bot
+2. Enter email and password
+3. Enter MFA code if required
 
-## Безопасность
+### Automatic Reports:
+The bot sends daily report at the specified time. Configure via:
+- "⏰ Report time" button in menu
+- `/settime` command
+- `REPORT_HOUR` and `REPORT_MINUTE` in `.env`
 
-- **Никогда** не публикуйте файл `.env` с вашими реальными учётными данными
-- Файл `.gitignore` уже настроен на исключение `.env`
-- Токены доступа хранятся локально в зашифрованном виде
-
-## Структура проекта
+## Project Structure
 
 ```
-garmin_app/
-├── garmin_app.py      # Основное приложение
-├── requirements.txt  # Зависимости
-├── .env.example       # Пример файла настроек
-└── README.md         # Этот файл
+fatSecretBot/
+├── telegram_bot.py      # Main Telegram bot
+├── requirements.txt    # Dependencies
+├── .env.example         # Example config file
+└── README.md           # This file
 ```
 
-## Лицензия
+## Security
+
+- **Never** publish `.env` file with your real credentials
+- `.gitignore` is already configured to exclude `.env`
+- Access tokens are stored locally
+
+## License
 
 MIT License
