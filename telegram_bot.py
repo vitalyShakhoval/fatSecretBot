@@ -646,6 +646,77 @@ REPORT_MINUTE = int(os.getenv('REPORT_MINUTE', '0'))
 # Например, для Москвы (UTC+3) -> TIMEZONE_OFFSET = 3
 TIMEZONE_OFFSET = int(os.getenv('TIMEZONE_OFFSET', '0'))
 
+# Глобальная переменная для job queue и scheduled job
+job_queue = None
+daily_report_job = None
+target_chat_id = None  # Глобальная переменная для chat_id
+
+
+async def send_daily_report_job(context: ContextTypes.DEFAULT_TYPE):
+    """Отправка ежедневного отчёта по расписанию"""
+    logger.info("Запуск автоматического отчёта за вчера...")
+    
+    # Используем chat_id из контекста задачи или из .env
+    chat_id = context.job.chat_id if context.job.chat_id else TELEGRAM_CHAT_ID
+    logger.info(f"Отправка в chat_id: {chat_id}")
+    
+    # Инициализируем подключения если нужно
+    if not bot.garmin_logged_in:
+        success, msg = await bot.init_garmin()
+        if not success:
+            logger.error(f"Garmin: {msg}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Garmin: {msg}"
+            )
+            return
+    
+    if not bot.fatsecret_logged_in:
+        success, msg = await bot.init_fatsecret()
+        if not success:
+            logger.error(f"FatSecret: {msg}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ FatSecret: {msg}"
+            )
+            return
+    
+    # Получаем отчёт
+    report = await bot.get_daily_report()
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=report,
+        parse_mode='HTML'
+    )
+    logger.info("Автоматический отчёт отправлен")
+
+
+def schedule_daily_report(jq, chat_id):
+    """Создание/обновление расписания ежедневного отчёта"""
+    global daily_report_job
+    
+    # Удаляем старую задачу если есть
+    if daily_report_job is not None:
+        try:
+            daily_report_job.remove()
+            logger.info("Удалена старая задача отчёта")
+        except:
+            pass
+    
+    # Вычисляем время в UTC
+    utc_hour = (REPORT_HOUR - TIMEZONE_OFFSET) % 24
+    utc_minute = REPORT_MINUTE
+    
+    # Создаём новую задачу
+    daily_report_job = jq.run_daily(
+        send_daily_report_job, 
+        time=time(hour=utc_hour, minute=utc_minute), 
+        chat_id=chat_id
+    )
+    
+    tz_display = f"UTC{'+' if TIMEZONE_OFFSET >= 0 else ''}{TIMEZONE_OFFSET}"
+    logger.info(f"Расписание обновлено: {REPORT_HOUR:02d}:{REPORT_MINUTE:02d} ({tz_display}) -> UTC: {utc_hour:02d}:{utc_minute:02d}")
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -1177,6 +1248,35 @@ def main():
         """Обработчик нажатий на кнопки"""
         text = update.message.text
         
+        # Проверяем, находимся ли мы в процессе настройки Garmin
+        garmin_state = context.user_data.get('garmin_setup_state')
+        if garmin_state == GARMIN_SETUP_EMAIL:
+            # Ожидаем ввод email
+            context.user_data.pop('garmin_setup_state', None)
+            await garmin_setup_email_received(update, context)
+            # Устанавливаем следующее состояние
+            context.user_data['garmin_setup_state'] = GARMIN_SETUP_PASSWORD
+            return
+        elif garmin_state == GARMIN_SETUP_PASSWORD:
+            # Ожидаем ввод пароля
+            context.user_data.pop('garmin_setup_state', None)
+            result = await garmin_setup_password_received(update, context)
+            # Если требуется MFA, устанавливаем соответствующее состояние
+            if result == GARMIN_SETUP_MFA:
+                context.user_data['garmin_setup_state'] = GARMIN_SETUP_MFA
+            return
+        elif garmin_state == GARMIN_SETUP_MFA:
+            # Ожидаем ввод MFA кода
+            context.user_data.pop('garmin_setup_state', None)
+            await garmin_setup_mfa_received(update, context)
+            return
+        
+        # Проверяем, ожидаем ли мы ввод PIN кода FatSecret
+        if context.user_data.get('fatsecret_oauth_state') == OAUTH_WAITING_FOR_PIN:
+            context.user_data.pop('fatsecret_oauth_state', None)
+            await oauth_pin_received(update, context)
+            return
+        
         # Проверяем, ожидаем ли мы ввод времени
         if context.user_data.get('waiting_for_time'):
             # Очищаем состояние
@@ -1223,6 +1323,14 @@ def main():
                         new_lines.append(f'REPORT_MINUTE={REPORT_MINUTE}')
                     
                     env_file.write_text('\n'.join(new_lines), encoding='utf-8')
+                    
+                    # Обновляем расписание
+                    try:
+                        jq = context.application.job_queue
+                        if jq:
+                            schedule_daily_report(jq, target_chat_id)
+                    except Exception as e:
+                        logger.error(f"Ошибка обновления расписания: {e}")
                     
                     await update.message.reply_text(
                         f"✅ <b>Время отчёта сохранено!</b>\n\n"
@@ -1284,6 +1392,14 @@ def main():
                     
                     env_file.write_text('\n'.join(new_lines), encoding='utf-8')
                     
+                    # Обновляем расписание
+                    try:
+                        jq = context.application.job_queue
+                        if jq:
+                            schedule_daily_report(jq, target_chat_id)
+                    except Exception as e:
+                        logger.error(f"Ошибка обновления расписания: {e}")
+                    
                     tz_display = f"UTC{'+' if TIMEZONE_OFFSET >= 0 else ''}{TIMEZONE_OFFSET}"
                     await update.message.reply_text(
                         f"✅ <b>Часовой пояс сохранён!</b>\n\n"
@@ -1327,8 +1443,12 @@ def main():
                 reply_markup=get_settings_keyboard(REPORT_HOUR, REPORT_MINUTE)
             )
         elif text == "🔐 FatSecret Auth":
+            # Запускаем OAuth авторизацию FatSecret
+            context.user_data['fatsecret_oauth_state'] = OAUTH_WAITING_FOR_PIN
             await authfat_command(update, context)
         elif text == "⚙️ Garmin Setup":
+            # Запускаем настройку Garmin через ConversationHandler
+            context.user_data['garmin_setup_state'] = GARMIN_SETUP_EMAIL
             await setupgarmin_command(update, context)
         elif text.startswith("⏰ Время отчёта:"):
             # Переход к настройке времени
