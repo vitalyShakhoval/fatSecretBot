@@ -20,6 +20,36 @@ from .storage import SQLiteStorage
 logger = logging.getLogger(__name__)
 OBSERVATION = "Все оценки — наблюдения по данным сервисов, а не медицинские диагнозы."
 SET_REPORT_TIME = 1
+MONTH_NAMES = (
+    "",
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+)
+
+
+def _number(value: float | int | str, digits: int = 0) -> str:
+    return f"{float(value):,.{digits}f}".replace(",", " ")
+
+
+def _observation() -> str:
+    return f"ℹ️ <i>{OBSERVATION}</i>"
+
+
+def _change(value: float | None) -> str:
+    if value is None:
+        return "— нет данных"
+    arrow = "↗️" if value > 0 else "↘️" if value < 0 else "➡️"
+    return f"{arrow} {value:+.1f}%"
 
 
 @dataclass(frozen=True)
@@ -46,28 +76,50 @@ class HealthBotService:
         nutrition = await self.nutrition.get_range(start, end)
         health = await self.garmin.get_range(start, end)
         ns, ts = nutrition_summary(nutrition), training_summary(health)
+        title = f"Сводка за день — {end:%d.%m.%Y}" if days == 1 else f"Сводка за {days} дней"
+        date_line = "" if days == 1 else f"\n🗓 {start:%d.%m}–{end:%d.%m.%Y}"
         return (
-            f"📊 <b>Сводка за {days} дн.</b>\n"
-            f"Питание: {ns['total_calories']:,.0f} ккал; Б/У/Ж в среднем: "
-            f"{ns['average_protein']:.0f}/{ns['average_carbohydrate']:.0f}/{ns['average_fat']:.0f} г\n"
-            f"Активность: {ts['total_steps']:,.0f} шагов; {ts['active_minutes']} активных минут; "
-            f"{ts['distance_km']:.1f} км\n\n{OBSERVATION}"
-        ).replace(",", " ")
+            f"📊 <b>{title}</b>{date_line}\n\n"
+            "🥗 <b>Питание</b>\n"
+            f"🔥 Калории: {_number(ns['total_calories'])} ккал\n"
+            f"🥩 Белки: {_number(ns['average_protein'])} г/день\n"
+            f"🍞 Углеводы: {_number(ns['average_carbohydrate'])} г/день\n"
+            f"🥑 Жиры: {_number(ns['average_fat'])} г/день\n"
+            f"📝 Дней с данными: {ns['days_with_data']}/{days}\n\n"
+            "🏃 <b>Активность</b>\n"
+            f"👟 Шаги: {_number(ts['total_steps'])}\n"
+            f"⏱️ Активные минуты: {ts['active_minutes']}\n"
+            f"📏 Дистанция: {_number(ts['distance_km'], 1)} км\n\n"
+            f"{_observation()}"
+        )
 
     async def garmin_day(self, day: date) -> str:
         row = await self.garmin.get_day(day)
-        return (
-            f"⌚ <b>Garmin за {day:%Y-%m-%d}</b>\n"
-            f"Шаги: {row.steps:,}; активные минуты: {row.active_minutes}; дистанция: {row.distance_km:.1f} км\n\n"
-            f"{OBSERVATION}"
-        ).replace(",", " ")
+        lines = [
+            f"⌚ <b>Garmin — {day:%d.%m.%Y}</b>",
+            "",
+            f"👟 Шаги: {_number(row.steps)}",
+            f"📏 Дистанция: {_number(row.distance_km, 1)} км",
+            f"⏱️ Активные минуты: {row.active_minutes}",
+        ]
+        if row.calories is not None:
+            lines.append(f"🔥 Калории: {_number(row.calories)} ккал")
+        if row.active_calories is not None:
+            lines.append(f"⚡ Активные калории: {_number(row.active_calories)} ккал")
+        if row.resting_hr is not None:
+            lines.append(f"💓 Пульс в покое: {_number(row.resting_hr)} уд/мин")
+        lines.extend(("", _observation()))
+        return "\n".join(lines)
 
     async def food_day(self, day: date) -> str:
         row = await self.nutrition.get_day(day)
         return (
-            f"🍽 <b>Питание за {day:%Y-%m-%d}</b>\n"
-            f"{row.calories:,.0f} ккал; Б/У/Ж: {row.protein:.0f}/{row.carbohydrate:.0f}/{row.fat:.0f} г"
-        ).replace(",", " ")
+            f"🥗 <b>Питание — {day:%d.%m.%Y}</b>\n\n"
+            f"🔥 Калории: {_number(row.calories)} ккал\n"
+            f"🥩 Белки: {_number(row.protein)} г\n"
+            f"🍞 Углеводы: {_number(row.carbohydrate)} г\n"
+            f"🥑 Жиры: {_number(row.fat)} г"
+        )
 
     async def month(self, today: date) -> str:
         start = today.replace(day=1)
@@ -92,16 +144,26 @@ class HealthBotService:
             "percent_change"
         ]
 
-        def change(value: float | None) -> str:
-            return "нет базы" if value is None else f"{value:+.1f}%"
-
         return (
-            f"📅 <b>Месяц {today:%Y-%m}</b>\n"
-            f"Питание: {ns['total_calories']:,.0f} ккал, среднее {ns['average_calories']:,.0f} ккал/день\n"
-            f"Активность: {ts['total_steps']:,.0f} шагов, среднее {ts['average_steps']:,.0f}/день\n"
-            f"Активные минуты: {ts['active_minutes']}, дистанция: {ts['distance_km']:.1f} км\n\n{OBSERVATION}"
-            f"\nК предыдущему сопоставимому периоду: калории {change(calorie_change)}, шаги {change(step_change)}."
-        ).replace(",", " ")
+            f"📅 <b>Итоги за {MONTH_NAMES[today.month]} {today.year}</b>\n"
+            f"🗓 Дней: {today.day}\n\n"
+            "🥗 <b>Питание</b>\n"
+            f"🔥 Калории: {_number(ns['total_calories'])} ккал\n"
+            f"📊 В среднем: {_number(ns['average_calories'])} ккал/день\n"
+            f"🥩 Белки: {_number(ns['average_protein'])} г/день\n"
+            f"🍞 Углеводы: {_number(ns['average_carbohydrate'])} г/день\n"
+            f"🥑 Жиры: {_number(ns['average_fat'])} г/день\n"
+            f"📝 Дней с данными: {ns['days_with_data']}/{today.day}\n\n"
+            "🏃 <b>Активность</b>\n"
+            f"👟 Шаги: {_number(ts['total_steps'])}\n"
+            f"📊 В среднем: {_number(ts['average_steps'])} шагов/день\n"
+            f"⏱️ Активные минуты: {ts['active_minutes']}\n"
+            f"📏 Дистанция: {_number(ts['distance_km'], 1)} км\n\n"
+            "📈 <b>К предыдущему периоду</b>\n"
+            f"🔥 Калории: {_change(calorie_change)}\n"
+            f"👟 Шаги: {_change(step_change)}\n\n"
+            f"{_observation()}"
+        )
 
     async def weight(self, today: date, days: int = 30) -> tuple[str, list]:
         rows = await self.garmin.get_range(today - timedelta(days=days - 1), today)
@@ -110,8 +172,11 @@ class HealthBotService:
             return "⚖️ Нет данных о весе за период.", []
         return (
             f"⚖️ <b>Вес за {days} дней</b>\n"
-            f"Начало: {trend['start_kg']:.1f} кг; сейчас: {trend['end_kg']:.1f} кг\n"
-            f"Изменение: {trend['change_kg']:+.1f} кг; среднее за 7 дней: {trend['seven_day_average']:.1f} кг\n\n{OBSERVATION}"
+            f"🏁 Начало: {trend['start_kg']:.1f} кг\n"
+            f"🎯 Сейчас: {trend['end_kg']:.1f} кг\n"
+            f"📈 Изменение: {trend['change_kg']:+.1f} кг\n"
+            f"〰️ Среднее за 7 измерений: {trend['seven_day_average']:.1f} кг\n\n"
+            f"{_observation()}"
         ), rows
 
     async def recovery(self, today: date, days: int = 28) -> tuple[str, list]:
@@ -120,10 +185,13 @@ class HealthBotService:
         def show(value: float | None, suffix: str = "") -> str:
             return "нет данных" if value is None else f"{value:.1f}{suffix}"
         text = (
-            f"💚 <b>Recovery baseline ({days} дней)</b>\n"
-            f"HRV: {show(baseline['hrv'])}; RHR: {show(baseline['resting_hr'], ' уд/мин')}\n"
-            f"Сон: {show(baseline['sleep_hours'], ' ч')}; стресс: {show(baseline['stress'])}\n"
-            f"Body Battery: {show(baseline['body_battery'])}\n\n{OBSERVATION}"
+            f"💚 <b>Восстановление за {days} дней</b>\n\n"
+            f"💗 HRV: {show(baseline['hrv'], ' мс')}\n"
+            f"💓 Пульс в покое: {show(baseline['resting_hr'], ' уд/мин')}\n"
+            f"😴 Сон: {show(baseline['sleep_hours'], ' ч')}\n"
+            f"🧠 Стресс: {show(baseline['stress'])}\n"
+            f"🔋 Body Battery: {show(baseline['body_battery'])}\n\n"
+            f"{_observation()}"
         )
         chart_rows = [row for row in rows if any(value is not None for value in (row.hrv, row.resting_hr, row.sleep_hours))]
         return text, chart_rows
@@ -132,11 +200,14 @@ class HealthBotService:
         rows = await self.garmin.get_range(today - timedelta(days=days - 1), today)
         summary = training_summary(rows)
         return (
-            f"🏃 <b>Тренировки за {days} дней</b>\n"
-            f"Активности: {summary['activities']}; активные минуты: {summary['active_minutes']}\n"
-            f"Шаги: {summary['total_steps']:,.0f}; дистанция: {summary['distance_km']:.1f} км\n"
-            f"Среднее шагов: {summary['average_steps']:,.0f}/день\n\n{OBSERVATION}"
-        ).replace(",", " "), rows
+            f"🏋️ <b>Тренировки за {days} дней</b>\n\n"
+            f"🎯 Активности: {summary['activities']}\n"
+            f"⏱️ Активные минуты: {summary['active_minutes']}\n"
+            f"👟 Шаги: {_number(summary['total_steps'])}\n"
+            f"📊 В среднем: {_number(summary['average_steps'])} шагов/день\n"
+            f"📏 Дистанция: {_number(summary['distance_km'], 1)} км\n\n"
+            f"{_observation()}"
+        ), rows
 
     def goals(self, args: list[str]) -> str:
         if self.storage is None:
