@@ -528,10 +528,22 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
             text = await service.period(end, 1)
             await context.bot.send_message(settings.telegram_chat_id, text, parse_mode="HTML")
 
+        async def scheduled_weekly_report(context: ContextTypes.DEFAULT_TYPE) -> None:
+            end = datetime.now(settings.timezone).date()
+            text = await service.period(end, 7)
+            await context.bot.send_message(settings.telegram_chat_id, text, parse_mode="HTML")
+
         app.job_queue.run_daily(
             scheduled_report,
             local_time,
             chat_id=settings.telegram_chat_id,
             name="daily-report",
+        )
+        app.job_queue.run_daily(
+            scheduled_weekly_report,
+            local_time,
+            days=(1,),
+            chat_id=settings.telegram_chat_id,
+            name="weekly-report",
         )
     return app

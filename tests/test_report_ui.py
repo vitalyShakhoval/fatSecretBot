@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -328,3 +329,38 @@ async def test_loading_message_is_edited_when_telegram_supports_edit(service):
     assert len(update.effective_message.replies) == 1
     assert update.effective_message.replies[0][0].startswith("⏳")
     assert "Garmin" in update.effective_message.status.edits[0][0]
+
+
+@pytest.mark.asyncio
+async def test_weekly_report_job_runs_on_monday_at_report_time():
+    class TrackingService:
+        def __init__(self):
+            self.calls = []
+
+        async def period(self, end, days):
+            self.calls.append((end, days))
+            return "weekly report"
+
+    class Bot:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.messages.append((chat_id, text, kwargs))
+
+    service = TrackingService()
+    settings = _settings()
+    app = build_application(settings, cast(Any, service))
+    assert app.job_queue is not None
+    jobs = {job.name: job for job in app.job_queue.jobs()}
+
+    assert "weekly-report" in jobs
+    assert "day_of_week='mon'" in str(jobs["weekly-report"].job.trigger)
+
+    bot = Bot()
+    await jobs["weekly-report"].callback(SimpleNamespace(bot=bot))
+
+    assert service.calls == [(datetime.now(settings.timezone).date(), 7)]
+    assert bot.messages == [
+        (settings.telegram_chat_id, "weekly report", {"parse_mode": "HTML"})
+    ]
