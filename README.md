@@ -1,122 +1,81 @@
-# Health Bot - Telegram Health Tracker
+# fatSecretBot
 
-Python application for retrieving health statistics from Garmin Connect and FatSecret via Telegram bot.
+Telegram-бот для API-first аналитики FatSecret и Garmin Connect. Данные питания и здоровья запрашиваются по требованию; SQLite хранит только цели, настройки расписания, разрешённые идентификаторы, sync state и TTL-кеш не дольше 24 часов.
 
-## Features
+## Команды
 
-### Garmin Connect
-- 👟 **Steps** - daily goal and progress
-- 📏 **Distance** - distance in km
-- 🔥 **Calories** - total and active
-- ⏱️ **Active Minutes** - physical activity time
-- 🏢 **Floors** - floors climbed
-- 💓 **Resting Heart Rate** - heart rate at rest
+Сохранены прежние `/today`, `/report`, `/week`, `/sendreport`, `/garmin`, `/food`, `/start`, `/help`, `/authfat`, `/setupgarmin`, `/settime`.
 
-### FatSecret
-- 📝 **Food Diary** - food entries by meal
-- 🥗 **Macronutrients** - protein, carbs, fat
-- 🔢 **Calories** - daily intake
+Новая аналитика:
 
-### Telegram Bot
-- 📊 `/today` - data for today
-- 📋 `/report` - report for yesterday
-- 📈 `/week` - weekly analytics
-- 🔐 `/authfat` - FatSecret authorization
-- ⚙️ `/setupgarmin` - Garmin setup
-- ⏰ Automatic report delivery on schedule
+- `/month` — итоги и средние за текущий месяц;
+- `/weight` — тренд веса и среднее за последние 7 доступных измерений + PNG;
+- `/recovery` — baseline HRV, RHR, сна, стресса и Body Battery + PNG;
+- `/training` — активности, шаги, активные минуты и дистанция + PNG;
+- `/goals` — список целей;
+- `/goals add steps 10000 daily` — добавить цель;
+- `/goals set 1 12000`, `/goals pause 1`, `/goals resume 1`, `/goals delete 1` — изменить цель.
 
-## Requirements
+Оценки и корреляции в ответах являются наблюдениями по данным трекеров, а не медицинскими диагнозами.
 
-- Python 3.12+
-- Telegram bot (get from @BotFather)
-- FatSecret account (with API keys)
-- Garmin Connect account
+## Безопасность
 
-## Getting FatSecret API Keys
+- Каждый входящий command handler проверяет одновременно `TELEGRAM_USER_ID` и `TELEGRAM_CHAT_ID`.
+- Garmin-пароль и OAuth-токены нельзя вводить или получать через Telegram. `/setupgarmin` и `/authfat` направляют к локальной настройке `.env`.
+- Секреты не пишутся в SQLite, ответы или логи. `.env`, Garmin tokens и базы исключены из Git/Docker context.
+- Время задаётся IANA-зоной `TIMEZONE` и обрабатывается через `zoneinfo` с учётом DST.
+- FatSecret cache автоматически удаляет истёкшие записи и запрещает TTL больше 86400 секунд. Долгосрочная история калорий/БЖУ/веса не сохраняется.
 
-1. Register at https://platform.fatsecret.com
-2. After creation you will get:
-   - **Client ID** (Consumer Key)
-   - **Client Secret** (Consumer Secret)
-3. To get OAuth tokens use `/authfat` command in the bot
+## Локальный запуск
 
-Documentation: https://platform.fatsecret.com/api/
+Требуется Python 3.12+.
 
-## Installation
-
-1. Clone the repository or download files
-
-2. Install dependencies:
 ```bash
+python -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
-```
-
-3. Create `.env` file from `.env.example`:
-```bash
-copy .env.example .env
-```
-
-4. Edit `.env`:
-```env
-# Telegram
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-
-# Garmin
-EMAIL=your_garmin_email
-PASSWORD=your_garmin_password
-
-# FatSecret (get from https://platform.fatsecret.com)
-FATSECRET_CLIENT_ID=your_client_id
-FATSECRET_CONSUMER_KEY=your_consumer_key
-FATSECRET_CONSUMER_SECRET=your_consumer_secret
-
-# Report settings (optional)
-REPORT_HOUR=12
-REPORT_MINUTE=0
-TIMEZONE_OFFSET=3
-```
-
-## Usage
-
-### Run Telegram bot:
-```bash
+cp .env.example .env
+# заполните .env локально
+python -m health_bot
+# прежняя точка входа также работает:
 python telegram_bot.py
 ```
 
-### FatSecret Authorization:
-1. Send `/authfat` to the bot
-2. Follow the link and authorize
-3. Get PIN code
-4. Send PIN to the bot
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_ID` и `TELEGRAM_CHAT_ID` обязательны. `TIMEZONE` — имя из IANA, например `Europe/Moscow`, а не `UTC+3`.
 
-### Garmin Setup:
-1. Send `/setupgarmin` to the bot
-2. Enter email and password
-3. Enter MFA code if required
+Адаптеры обнаруживают доступные методы SDK. Синхронные запросы диапазонов выполняются через `asyncio.to_thread`; Garmin использует retry с exponential backoff, а отсутствующие метрики остаются `None`.
 
-### Automatic Reports:
-The bot sends daily report at the specified time. Configure via:
-- "⏰ Report time" button in menu
-- `/settime` command
-- `REPORT_HOUR` and `REPORT_MINUTE` in `.env`
+## Docker
 
-## Project Structure
-
-```
-fatSecretBot/
-├── telegram_bot.py      # Main Telegram bot
-├── requirements.txt    # Dependencies
-├── .env.example         # Example config file
-└── README.md           # This file
+```bash
+cp .env.example .env
+# заполните .env
+docker compose up --build -d
+docker compose ps
 ```
 
-## Security
+State и Garmin session tokens размещаются в отдельных volumes. Health check запускает `python -m health_bot.healthcheck`.
 
-- **Never** publish `.env` file with your real credentials
-- `.gitignore` is already configured to exclude `.env`
-- Access tokens are stored locally
+## Разработка и проверки
 
-## License
+```bash
+pytest -q
+ruff check .
+python -m compileall -q health_bot telegram_bot.py tests
+```
 
-MIT License
+CI в `.github/workflows/tests.yml` выполняет тесты, Ruff, compileall и Gitleaks. Тесты используют фикстуры SDK и не обращаются к реальным API или секретам.
+
+## Структура
+
+```text
+health_bot/
+  config.py       # строгая конфигурация и zoneinfo
+  models.py       # доменные модели
+  clients.py      # API adapters, retries, capability fallback
+  storage.py      # SQLite schema, goals, settings/state, TTL cache
+  analytics.py    # периодные итоги, weight/recovery/training
+  charts.py       # временные PNG и безопасное удаление
+  bot.py          # authorization policy, commands and services
+telegram_bot.py   # совместимая точка входа
+```

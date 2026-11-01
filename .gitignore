@@ -38,5 +38,10 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Garmin tokens
+# Garmin tokens and local state
 .garminconnect/
+*.sqlite3
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
