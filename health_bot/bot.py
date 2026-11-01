@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import wraps
-from typing import Any
+from typing import Any, cast
 
-from telegram import Update
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from .analytics import nutrition_summary, period_comparison, recovery_summary, training_summary, weight_trend
@@ -35,6 +37,18 @@ MONTH_NAMES = (
     "ноябрь",
     "декабрь",
 )
+MENU_ACTIONS = {
+    "📊 Сегодня": "today",
+    "📋 Вчера": "report",
+    "📈 Неделя": "week",
+    "📅 Месяц": "month",
+    "⚖️ Вес": "weight",
+    "💚 Восстановление": "recovery",
+    "🏋️ Тренировки": "training",
+    "🎯 Цели": "goals",
+    "⌚ Garmin": "garmin",
+    "🥗 Питание": "food",
+}
 
 
 def _number(value: float | int | str, digits: int = 0) -> str:
@@ -50,6 +64,57 @@ def _change(value: float | None) -> str:
         return "— нет данных"
     arrow = "↗️" if value > 0 else "↘️" if value < 0 else "➡️"
     return f"{arrow} {value:+.1f}%"
+
+
+def _days_word(value: int) -> str:
+    if value % 10 == 1 and value % 100 != 11:
+        return "день"
+    if value % 10 in {2, 3, 4} and value % 100 not in {12, 13, 14}:
+        return "дня"
+    return "дней"
+
+
+def _balance_section(
+    consumed: float,
+    burned: float,
+    nutrition_days: int,
+    burn_days: int,
+    expected_days: int,
+) -> str:
+    lines = ["⚖️ <b>Сальдо калорий</b>"]
+    if nutrition_days < expected_days or burn_days < expected_days:
+        lines.extend(
+            (
+                "⚠️ Недостаточно данных для сальдо за весь период",
+                f"📝 Питание: {nutrition_days}/{expected_days} дней",
+                f"🔥 Расход: {burn_days}/{expected_days} дней",
+            )
+        )
+        return "\n".join(lines)
+    lines.extend(
+        (
+            f"🍽 Получено: {_number(consumed)} ккал",
+            f"🔥 Потрачено: {_number(burned)} ккал",
+        )
+    )
+    balance = consumed - burned
+    if balance > 0:
+        lines.append(f"🔺 Профицит: {_number(balance)} ккал")
+    elif balance < 0:
+        lines.append(f"🔻 Дефицит: {_number(abs(balance))} ккал")
+    else:
+        lines.append("✅ Баланс: 0 ккал")
+    return "\n".join(lines)
+
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    rows = (
+        (KeyboardButton("📊 Сегодня"), KeyboardButton("📋 Вчера"), KeyboardButton("📈 Неделя")),
+        (KeyboardButton("📅 Месяц"), KeyboardButton("⚖️ Вес")),
+        (KeyboardButton("💚 Восстановление"), KeyboardButton("🏋️ Тренировки")),
+        (KeyboardButton("🎯 Цели"), KeyboardButton("⌚ Garmin"), KeyboardButton("🥗 Питание")),
+    )
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 @dataclass(frozen=True)
@@ -76,20 +141,34 @@ class HealthBotService:
         nutrition = await self.nutrition.get_range(start, end)
         health = await self.garmin.get_range(start, end)
         ns, ts = nutrition_summary(nutrition), training_summary(health)
-        title = f"Сводка за день — {end:%d.%m.%Y}" if days == 1 else f"Сводка за {days} дней"
+        expected_dates = {start + timedelta(days=offset) for offset in range(days)}
+        nutrition_by_day = {row.day: row for row in nutrition if row.day in expected_dates and row.calories > 0}
+        health_by_day = {
+            row.day: row
+            for row in health
+            if row.day in expected_dates and row.calories is not None and row.calories > 0
+        }
+        consumed = sum(float(row.calories) for row in nutrition_by_day.values())
+        burned = sum(float(row.calories or 0) for row in health_by_day.values())
+        title = (
+            f"Сводка за день — {end:%d.%m.%Y}"
+            if days == 1
+            else f"Сводка за {days} {_days_word(days)}"
+        )
         date_line = "" if days == 1 else f"\n🗓 {start:%d.%m}–{end:%d.%m.%Y}"
         return (
             f"📊 <b>{title}</b>{date_line}\n\n"
             "🥗 <b>Питание</b>\n"
             f"🔥 Калории: {_number(ns['total_calories'])} ккал\n"
             f"🥩 Белки: {_number(ns['average_protein'])} г/день\n"
-            f"🍞 Углеводы: {_number(ns['average_carbohydrate'])} г/день\n"
             f"🥑 Жиры: {_number(ns['average_fat'])} г/день\n"
+            f"🍞 Углеводы: {_number(ns['average_carbohydrate'])} г/день\n"
             f"📝 Дней с данными: {ns['days_with_data']}/{days}\n\n"
             "🏃 <b>Активность</b>\n"
             f"👟 Шаги: {_number(ts['total_steps'])}\n"
             f"⏱️ Активные минуты: {ts['active_minutes']}\n"
             f"📏 Дистанция: {_number(ts['distance_km'], 1)} км\n\n"
+            f"{_balance_section(consumed, burned, len(nutrition_by_day), len(health_by_day), days)}\n\n"
             f"{_observation()}"
         )
 
@@ -117,8 +196,8 @@ class HealthBotService:
             f"🥗 <b>Питание — {day:%d.%m.%Y}</b>\n\n"
             f"🔥 Калории: {_number(row.calories)} ккал\n"
             f"🥩 Белки: {_number(row.protein)} г\n"
-            f"🍞 Углеводы: {_number(row.carbohydrate)} г\n"
-            f"🥑 Жиры: {_number(row.fat)} г"
+            f"🥑 Жиры: {_number(row.fat)} г\n"
+            f"🍞 Углеводы: {_number(row.carbohydrate)} г"
         )
 
     async def month(self, today: date) -> str:
@@ -126,6 +205,15 @@ class HealthBotService:
         nutrition = await self.nutrition.get_month(today.year, today.month, through=today)
         health = await self.garmin.get_range(start, today)
         ns, ts = nutrition_summary(nutrition), training_summary(health)
+        expected_dates = {start + timedelta(days=offset) for offset in range(today.day)}
+        nutrition_by_day = {row.day: row for row in nutrition if row.day in expected_dates and row.calories > 0}
+        health_by_day = {
+            row.day: row
+            for row in health
+            if row.day in expected_dates and row.calories is not None and row.calories > 0
+        }
+        consumed = sum(float(row.calories) for row in nutrition_by_day.values())
+        burned = sum(float(row.calories or 0) for row in health_by_day.values())
         previous_end = start - timedelta(days=1)
         previous_start = previous_end.replace(day=1)
         elapsed_end = min(previous_start + timedelta(days=today.day - 1), previous_end)
@@ -151,14 +239,15 @@ class HealthBotService:
             f"🔥 Калории: {_number(ns['total_calories'])} ккал\n"
             f"📊 В среднем: {_number(ns['average_calories'])} ккал/день\n"
             f"🥩 Белки: {_number(ns['average_protein'])} г/день\n"
-            f"🍞 Углеводы: {_number(ns['average_carbohydrate'])} г/день\n"
             f"🥑 Жиры: {_number(ns['average_fat'])} г/день\n"
+            f"🍞 Углеводы: {_number(ns['average_carbohydrate'])} г/день\n"
             f"📝 Дней с данными: {ns['days_with_data']}/{today.day}\n\n"
             "🏃 <b>Активность</b>\n"
             f"👟 Шаги: {_number(ts['total_steps'])}\n"
             f"📊 В среднем: {_number(ts['average_steps'])} шагов/день\n"
             f"⏱️ Активные минуты: {ts['active_minutes']}\n"
             f"📏 Дистанция: {_number(ts['distance_km'], 1)} км\n\n"
+            f"{_balance_section(consumed, burned, len(nutrition_by_day), len(health_by_day), today.day)}\n\n"
             "📈 <b>К предыдущему периоду</b>\n"
             f"🔥 Калории: {_change(calorie_change)}\n"
             f"👟 Шаги: {_change(step_change)}\n\n"
@@ -263,9 +352,19 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
     policy = AccessPolicy(settings.telegram_user_id, settings.telegram_chat_id)
     app = Application.builder().token(settings.telegram_bot_token).build()
 
-    async def reply(update: Update, text: str) -> None:
+    async def reply(update: Update, text: str, **kwargs: Any) -> Any:
         if update.effective_message:
-            await update.effective_message.reply_text(text, parse_mode="HTML")
+            return await update.effective_message.reply_text(text, parse_mode="HTML", **kwargs)
+        return None
+
+    async def loading(update: Update, label: str) -> Any:
+        return await reply(update, f"⏳ <b>{label}</b>\nПолучаю данные…")
+
+    async def finish_loading(update: Update, status: Any, text: str) -> None:
+        try:
+            await status.edit_text(text, parse_mode="HTML")
+        except (AttributeError, TelegramError):
+            await reply(update, text)
 
     async def application_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         error = context.error
@@ -287,7 +386,19 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
         await message.reply_text(response)
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await reply(update, "Health Bot\n/today /report /week /month /weight /recovery /training /goals /garmin /food")
+        await reply(
+            update,
+            "👋 <b>Health Bot</b>\n"
+            "Ваши данные Garmin и FatSecret в одном месте.\n\n"
+            "📊 <b>Отчёты</b>\n"
+            "• Сегодня, вчера, неделя и месяц\n"
+            "• Вес, восстановление и тренировки\n\n"
+            "⌚ <b>Источники</b>\n"
+            "• Garmin — активность и восстановление\n"
+            "• FatSecret — питание и БЖУ\n\n"
+            "Выберите раздел на клавиатуре 👇",
+            reply_markup=main_menu_keyboard(),
+        )
 
     async def setupgarmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await reply(update, forbidden_garmin_setup_message())
@@ -297,7 +408,8 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
 
     async def month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         today = datetime.now(settings.timezone).date()
-        await reply(update, await service.month(today))
+        status = await loading(update, "Формирую отчёт за месяц")
+        await finish_loading(update, status, await service.month(today))
         rows = await service.nutrition.get_month(today.year, today.month, through=today)
         if rows and update.effective_message:
             path = energy_chart(rows)
@@ -305,9 +417,10 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
                 with path.open("rb") as image:
                     await update.effective_message.reply_photo(image)
 
-    async def _chart_command(update: Update, producer: Callable, chart: Callable) -> None:
+    async def _chart_command(update: Update, label: str, producer: Callable, chart: Callable) -> None:
+        status = await loading(update, label)
         text, rows = await producer(datetime.now(settings.timezone).date())
-        await reply(update, text)
+        await finish_loading(update, status, text)
         if rows and update.effective_message:
             path = chart(rows)
             with chart_file(path):
@@ -315,13 +428,13 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
                     await update.effective_message.reply_photo(image)
 
     async def weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await _chart_command(update, service.weight, weight_chart)
+        await _chart_command(update, "Загружаю динамику веса", service.weight, weight_chart)
 
     async def recovery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await _chart_command(update, service.recovery, recovery_chart)
+        await _chart_command(update, "Анализирую восстановление", service.recovery, recovery_chart)
 
     async def training(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await _chart_command(update, service.training, training_chart)
+        await _chart_command(update, "Собираю данные тренировок", service.training, training_chart)
 
     async def goals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await reply(update, service.goals(context.args or []))
@@ -345,18 +458,35 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
         return ConversationHandler.END
 
     async def garmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await reply(update, await service.garmin_day(datetime.now(settings.timezone).date()))
+        status = await loading(update, "Загружаю Garmin")
+        text = await service.garmin_day(datetime.now(settings.timezone).date())
+        await finish_loading(update, status, text)
 
     async def food(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await reply(update, await service.food_day(datetime.now(settings.timezone).date()))
+        status = await loading(update, "Загружаю питание")
+        text = await service.food_day(datetime.now(settings.timezone).date())
+        await finish_loading(update, status, text)
 
-    async def legacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        command = (update.effective_message.text or "").split()[0].lstrip("/").split("@")[0] if update.effective_message else ""
-        days = 7 if command in {"week"} else 1
+    async def send_period(update: Update, command: str) -> None:
+        days = 7 if command == "week" else 1
         end = datetime.now(settings.timezone).date()
         if command in {"report", "sendreport"}:
             end -= timedelta(days=1)
-        await reply(update, await service.period(end, days))
+        labels = {
+            "week": "Формирую отчёт за неделю",
+            "report": "Загружаю отчёт за вчера",
+            "sendreport": "Загружаю отчёт за вчера",
+        }
+        status = await loading(update, labels.get(command, "Загружаю данные за сегодня"))
+        await finish_loading(update, status, await service.period(end, days))
+
+    async def legacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        command = (
+            (update.effective_message.text or "").split()[0].lstrip("/").split("@")[0]
+            if update.effective_message
+            else ""
+        )
+        await send_period(update, command)
 
     handlers = {
         "start": start, "help": start, "setupgarmin": setupgarmin, "authfat": authfat,
@@ -366,6 +496,17 @@ def build_application(settings: Settings, service: HealthBotService) -> Applicat
     }
     for command, handler in handlers.items():
         app.add_handler(CommandHandler(command, _authorized(policy, handler)))
+
+    async def menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        label = (update.effective_message.text or "") if update.effective_message else ""
+        action = MENU_ACTIONS.get(label)
+        if action in {"today", "report", "week"}:
+            await send_period(update, action)
+        elif action:
+            await handlers[action](update, context)
+
+    menu_pattern = "^(?:" + "|".join(re.escape(label) for label in MENU_ACTIONS) + ")$"
+    app.add_handler(MessageHandler(filters.Regex(menu_pattern), cast(Any, _authorized(policy, menu_action))))
     app.add_handler(
         ConversationHandler(
             entry_points=[CommandHandler("settime", _authorized(policy, settime))],

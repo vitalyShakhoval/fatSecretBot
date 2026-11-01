@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
+from typing import Any, cast
 
 import pytest
+from telegram.ext import CommandHandler, MessageHandler
 
-from health_bot.bot import HealthBotService
+from health_bot import bot as bot_module
+from health_bot.bot import HealthBotService, build_application
+from health_bot.config import Settings
 from health_bot.models import DailyHealth, DailyNutrition
 
 
@@ -112,3 +116,215 @@ async def test_weight_recovery_and_training_reports_use_scannable_emoji_lines(se
     assert "🏋️ <b>Тренировки" in training
     assert "🎯 Активности:" in training
     assert "👟 Шаги:" in training
+
+
+@pytest.mark.asyncio
+async def test_nutrition_metrics_use_protein_fat_carbohydrate_order(service):
+    reports = [
+        await service.period(date(2026, 11, 1), 1),
+        await service.food_day(date(2026, 11, 1)),
+        await service.month(date(2026, 11, 1)),
+    ]
+
+    for text in reports:
+        assert text.index("🥩 Белки:") < text.index("🥑 Жиры:") < text.index("🍞 Углеводы:")
+
+
+@pytest.mark.asyncio
+async def test_period_and_month_reports_show_final_calorie_surplus(service):
+    period = await service.period(date(2026, 11, 1), 1)
+    month = await service.month(date(2026, 11, 1))
+
+    for text in (period, month):
+        assert "⚖️ <b>Сальдо калорий</b>" in text
+        assert "🍽 Получено: 2 617 ккал" in text
+        assert "🔥 Потрачено: 2 380 ккал" in text
+        assert "🔺 Профицит: 237 ккал" in text
+
+
+@pytest.mark.asyncio
+async def test_period_report_labels_calorie_deficit():
+    class DeficitNutrition(NutritionSource):
+        async def get_day(self, day: date) -> DailyNutrition:
+            return DailyNutrition(day, calories=1800, protein=100, carbohydrate=150, fat=60)
+
+    service = HealthBotService(DeficitNutrition(), GarminSource(), None)
+    text = await service.period(date(2026, 11, 1), 1)
+
+    assert "🔻 Дефицит: 580 ккал" in text
+
+
+@pytest.mark.asyncio
+async def test_balance_is_not_calculated_from_incomplete_period_data():
+    class MissingNutrition(NutritionSource):
+        async def get_range(self, start: date, end: date) -> list[DailyNutrition]:
+            return [DailyNutrition(start, calories=0)]
+
+    service = HealthBotService(MissingNutrition(), GarminSource(), None)
+    text = await service.period(date(2026, 11, 1), 1)
+
+    assert "⚠️ Недостаточно данных для сальдо" in text
+    assert "Дефицит" not in text
+    assert "Профицит" not in text
+
+
+@pytest.mark.asyncio
+async def test_balance_requires_complete_coverage_for_multi_day_period():
+    service = HealthBotService(NutritionSource(), GarminSource(), None)
+    text = await service.period(date(2026, 11, 1), 7)
+
+    assert "📝 Питание: 1/7 дней" in text
+    assert "🔥 Расход: 1/7 дней" in text
+    assert "Дефицит" not in text
+    assert "Профицит" not in text
+
+
+@pytest.mark.asyncio
+async def test_balance_coverage_uses_unique_dates_inside_period():
+    repeated_day = date(2026, 10, 31)
+
+    class DuplicateNutrition(NutritionSource):
+        async def get_range(self, start: date, end: date) -> list[DailyNutrition]:
+            row = DailyNutrition(repeated_day, calories=1800, protein=100, carbohydrate=150, fat=60)
+            return [row, row]
+
+    class DuplicateGarmin(GarminSource):
+        async def get_range(self, start: date, end: date) -> list[DailyHealth]:
+            row = DailyHealth(repeated_day, calories=2380)
+            return [row, row]
+
+    service = HealthBotService(DuplicateNutrition(), DuplicateGarmin(), None)
+    text = await service.period(date(2026, 11, 1), 2)
+
+    assert "📝 Питание: 1/2 дней" in text
+    assert "🔥 Расход: 1/2 дней" in text
+    assert "Дефицит" not in text
+    assert "Профицит" not in text
+
+
+class FakeMessage:
+    def __init__(self, text: str):
+        self.text = text
+        self.replies: list[tuple[str, dict]] = []
+
+    async def reply_text(self, text: str, **kwargs) -> Any:
+        self.replies.append((text, kwargs))
+        return self
+
+
+class FakeUpdate:
+    def __init__(self, text: str):
+        self.effective_user = type("User", (), {"id": 10})()
+        self.effective_chat = type("Chat", (), {"id": 20})()
+        self.effective_message = FakeMessage(text)
+
+
+def _settings() -> Settings:
+    return Settings.from_mapping(
+        {
+            "TELEGRAM_BOT_TOKEN": "123:TEST",
+            "TELEGRAM_USER_ID": "10",
+            "TELEGRAM_CHAT_ID": "20",
+        }
+    )
+
+
+def _command_callback(app, command: str):
+    return next(
+        handler.callback
+        for handlers in app.handlers.values()
+        for handler in handlers
+        if isinstance(handler, CommandHandler) and command in handler.commands
+    )
+
+
+def _menu_callback(app):
+    return next(
+        handler.callback
+        for handlers in app.handlers.values()
+        for handler in handlers
+        if isinstance(handler, MessageHandler)
+    )
+
+
+@pytest.mark.asyncio
+async def test_data_command_sends_immediate_loading_feedback(service):
+    app = build_application(_settings(), service)
+    update = FakeUpdate("/garmin")
+
+    await _command_callback(app, "garmin")(cast(Any, update), type("Context", (), {"args": []})())
+
+    assert update.effective_message.replies[0][0].startswith("⏳")
+    assert "Garmin" in update.effective_message.replies[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_start_has_structured_text_and_reply_keyboard(service):
+    app = build_application(_settings(), service)
+    update = FakeUpdate("/start")
+
+    await _command_callback(app, "start")(cast(Any, update), type("Context", (), {"args": []})())
+
+    text, kwargs = update.effective_message.replies[-1]
+    assert "👋 <b>Health Bot</b>" in text
+    assert "📊 <b>Отчёты</b>" in text
+    assert "⌚ <b>Источники</b>" in text
+    keyboard = kwargs.get("reply_markup")
+    assert keyboard is not None
+    labels = [button.text for row in keyboard.keyboard for button in row]
+    assert {"📊 Сегодня", "📋 Вчера", "📈 Неделя", "📅 Месяц"} <= set(labels)
+    assert getattr(bot_module, "MENU_ACTIONS", {}).get("📊 Сегодня") == "today"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "days", "day_offset"),
+    (("📊 Сегодня", 1, 0), ("📋 Вчера", 1, 1), ("📈 Неделя", 7, 0)),
+)
+async def test_report_menu_buttons_request_the_correct_period(label, days, day_offset):
+    class TrackingService:
+        def __init__(self):
+            self.calls = []
+
+        async def period(self, end, requested_days):
+            self.calls.append((end, requested_days))
+            return "готово"
+
+    service = TrackingService()
+    settings = _settings()
+    app = build_application(settings, cast(Any, service))
+    update = FakeUpdate(label)
+
+    await _menu_callback(app)(cast(Any, update), type("Context", (), {"args": []})())
+
+    expected_end = datetime.now(settings.timezone).date() - timedelta(days=day_offset)
+    assert service.calls == [(expected_end, days)]
+
+
+@pytest.mark.asyncio
+async def test_loading_message_is_edited_when_telegram_supports_edit(service):
+    class EditableStatus:
+        def __init__(self):
+            self.edits = []
+
+        async def edit_text(self, text, **kwargs):
+            self.edits.append((text, kwargs))
+
+    class EditableMessage(FakeMessage):
+        def __init__(self, text):
+            super().__init__(text)
+            self.status = EditableStatus()
+
+        async def reply_text(self, text: str, **kwargs) -> Any:
+            self.replies.append((text, kwargs))
+            return self.status
+
+    app = build_application(_settings(), service)
+    update = FakeUpdate("/garmin")
+    update.effective_message = EditableMessage("/garmin")
+
+    await _command_callback(app, "garmin")(cast(Any, update), type("Context", (), {"args": []})())
+
+    assert len(update.effective_message.replies) == 1
+    assert update.effective_message.replies[0][0].startswith("⏳")
+    assert "Garmin" in update.effective_message.status.edits[0][0]
