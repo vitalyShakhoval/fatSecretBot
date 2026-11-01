@@ -19,7 +19,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: ruff check .
       - run: python -m compileall -q health_bot telegram_bot.py tests
-      - run: pytest -q
+      - run: python -m pytest -q
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
         env:
