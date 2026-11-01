@@ -1,0 +1,12 @@
+# Build context noise and secrets
+.env
+.git
+.github
+.venv
+venv
+__pycache__
+.pytest_cache
+.ruff_cache
+*.pyc
+*.sqlite3
+.garminconnect

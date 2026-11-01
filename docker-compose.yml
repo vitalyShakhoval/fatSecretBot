@@ -1,0 +1,21 @@
+services:
+  health-bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/health_bot.sqlite3
+    volumes:
+      - health-data:/data
+      - garmin-tokens:/home/bot/.garminconnect
+    healthcheck:
+      test: ["CMD", "python", "-m", "health_bot.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  health-data:
+  garmin-tokens:
